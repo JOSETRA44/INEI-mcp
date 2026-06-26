@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "inei": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "C:\\Users\\USER\\source\\MCPs\\INEI-mcp",
+        "run",
+        "inei-mcp"
+      ]
+    }
+  }
+}
