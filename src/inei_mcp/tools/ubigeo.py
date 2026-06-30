@@ -55,61 +55,62 @@ def register_ubigeo_tools(mcp: FastMCP, client: INEIClient) -> None:
         ],
     ) -> dict:
         try:
-            raw = await client.get(f"/ubigeo/{ccdd.zfill(2)}/")
-            provinces = format_geography_list(raw)
+            raw = await client.get("/ubigeo/")
+            all_depts = format_geography_list(raw)
+            code = ccdd.zfill(2)
+            match = [d for d in all_depts if d.get("ccdd") == code]
+            if not match:
+                raise ToolError(f"Department ccdd='{code}' not found. Use inei_get_departments for valid codes.")
             return {
-                "ccdd": ccdd.zfill(2),
-                "count": len(provinces),
-                "provinces": provinces,
-                "tip": "Use ccpp with inei_get_districts to list districts within a province.",
+                "ccdd": code,
+                "department": match[0],
+                "note": (
+                    "The current INEI Estadist API only exposes department-level geography. "
+                    "Use id_geografia with inei_get_geography_profile for census data."
+                ),
             }
-        except INEINotFoundError as exc:
-            raise ToolError(f"Department ccdd='{ccdd}' not found. Use inei_get_departments for valid codes.") from exc
         except (INEIAPIError, INEITimeoutError) as exc:
             raise ToolError(str(exc)) from exc
 
     @mcp.tool(
         name="inei_get_districts",
         description=(
-            "List districts in a province, or search districts by name across Peru.\n\n"
-            "**Option 1:** Provide both `ccdd` and `ccpp` to list all districts of a province.\n"
-            "**Option 2:** Provide only `search` to search district names across all Peru.\n\n"
-            "Returns id_geografia, ubigeo, nombre, departamento, provincia, distrito."
+            "Returns all 25 Peruvian departments (province/district data not available via current API).\n\n"
+            "Note: The INEI Estadist API currently only exposes department-level geography. "
+            "Use id_geografia from the results with inei_get_geography_profile for census data."
         ),
     )
     async def inei_get_districts(
         ccdd: Annotated[
             str | None,
-            Field(default=None, description="2-digit department code (required with ccpp)"),
+            Field(default=None, description="Department code (optional filter)"),
         ] = None,
         ccpp: Annotated[
             str | None,
-            Field(default=None, description="2-digit province code (required with ccdd)"),
+            Field(default=None, description="Province code (not used, API not available)"),
         ] = None,
         search: Annotated[
             str | None,
-            Field(default=None, description="Search term to find districts by name across Peru."),
+            Field(default=None, description="Search term (client-side filter on department names)"),
         ] = None,
     ) -> dict:
-        if not ccdd and not search:
-            raise ToolError("Provide either (ccdd + ccpp) to list a province's districts, or search to find districts by name.")
-
         try:
-            if ccdd and ccpp:
-                raw = await client.get(f"/ubigeo/{ccdd.zfill(2)}/{ccpp.zfill(2)}/")
-            else:
-                params = {}
-                if search:
-                    params["search"] = search
-                raw = await client.get("/ubigeo/distritos/", params=params)
-
-            districts = format_geography_list(raw)
+            raw = await client.get("/ubigeo/")
+            all_depts = format_geography_list(raw)
+            filtered = all_depts
+            if ccdd:
+                filtered = [d for d in all_depts if d.get("ccdd") == ccdd.zfill(2)]
+            if search:
+                kw = search.lower()
+                filtered = [d for d in filtered if kw in (d.get("nombre") or "").lower()]
             return {
-                "count": len(districts),
-                "districts": districts,
-                "tip": "Use id_geografia with inei_get_geography_profile for census data.",
+                "available_data": "departments_only",
+                "count": len(filtered),
+                "departments": filtered,
+                "note": (
+                    "Province and district endpoints are not available in the current INEI API. "
+                    "Use inei_get_geography_profile with a department id_geografia for census profile data."
+                ),
             }
-        except INEINotFoundError as exc:
-            raise ToolError(str(exc)) from exc
         except (INEIAPIError, INEITimeoutError) as exc:
             raise ToolError(str(exc)) from exc

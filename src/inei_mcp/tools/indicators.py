@@ -1,3 +1,4 @@
+import unicodedata
 from typing import Annotated
 
 from mcp.server.fastmcp import FastMCP
@@ -7,11 +8,15 @@ from pydantic import Field
 from ..client import INEIClient
 from ..exceptions import INEIAPIError, INEINotFoundError, INEITimeoutError
 from ..formatters import (
-    format_comp_filters,
-    format_indicator_filters,
+    format_geography_profile,
     format_indicator_search,
     format_thematic_tree,
 )
+
+
+def _norm(text: str) -> str:
+    """Lowercase + strip accents for accent-insensitive search."""
+    return unicodedata.normalize("NFD", text.lower()).encode("ascii", "ignore").decode()
 
 
 def register_indicator_tools(mcp: FastMCP, client: INEIClient) -> None:
@@ -44,14 +49,20 @@ def register_indicator_tools(mcp: FastMCP, client: INEIClient) -> None:
         ] = 0,
     ) -> dict:
         try:
-            raw = await client.get(
-                "/thematics/indicator/",
-                params={"search": query, "limit": limit, "offset": offset},
-            )
-            # API returns a list (not paginated dict) for this endpoint
+            # Use /thematics/ (1977 items, all leaf indicators) for broader search coverage
+            raw = await client.get("/thematics/")
             items = raw if isinstance(raw, list) else raw.get("results", [])
-            total = len(raw) if isinstance(raw, list) else raw.get("count")
-            return format_indicator_search(items, total)
+            kw = _norm(query)
+            matching = [
+                t for t in items
+                if t.get("tipo") == 2 and t.get("idIndicador")
+                and (
+                    kw in _norm(t.get("descripTema") or "")
+                    or kw in _norm(t.get("descripTemaIndicador") or "")
+                )
+            ]
+            page = matching[offset: offset + limit]
+            return format_indicator_search(page, total=len(matching))
         except INEITimeoutError as exc:
             raise ToolError(str(exc)) from exc
         except (INEINotFoundError, INEIAPIError) as exc:
@@ -60,12 +71,12 @@ def register_indicator_tools(mcp: FastMCP, client: INEIClient) -> None:
     @mcp.tool(
         name="inei_get_indicator_data",
         description=(
-            "Get statistical data for a specific INEI indicator across geographies.\n\n"
-            "Retrieves values (absolute and percentage) for the indicator broken down by "
-            "all available geographies. Use `inei_search_indicators` to find indicator IDs.\n\n"
-            "**Optional:** provide `id_geografia` to filter to a specific region and also get "
-            "comparative data against national/regional benchmarks.\n\n"
-            "Returns values by geography: absolute value, percentage, and annual figure.\n\n"
+            "Get census data for a geography, referencing a specific indicator ID.\n\n"
+            "**Requires both** id_indicador (from inei_search_indicators) and id_geografia "
+            "(from inei_get_departments). Returns the full census profile for that geography "
+            "including population totals, housing, education, and economic indicators.\n\n"
+            "Note: due to API changes, returns all available census data for the geography "
+            "rather than a single filtered indicator. Scan seccion1/seccion2 for your indicator.\n\n"
             "**Common indicator IDs (Census 2017):**\n"
             "- 516654: Población Total\n"
             "- 262215: Población Censada\n"
@@ -90,35 +101,26 @@ def register_indicator_tools(mcp: FastMCP, client: INEIClient) -> None:
         ] = None,
     ) -> dict:
         try:
-            params: dict = {"id_indicador": id_indicador}
-            if id_geografia:
-                params["id_geografia"] = id_geografia
-
-            if id_geografia:
-                # Use comp-filters for richer comparative data when geography is specified
-                raw = await client.get(
-                    "/thematics/indicator/comp-filters/",
-                    params={"id_indicador": id_indicador, "id_geografia": id_geografia},
+            if id_geografia is None:
+                raise ToolError(
+                    "id_geografia is required. "
+                    "Use inei_get_departments to find id_geografia values, "
+                    "then call inei_get_geography_profile or pass id_geografia here."
                 )
-                data = format_comp_filters(raw if isinstance(raw, list) else [])
-                return {
-                    "id_indicador": id_indicador,
-                    "id_geografia": id_geografia,
-                    "count": len(data),
-                    "data": data,
-                    "tip": "Values include departmental, provincial and district breakdown where available.",
-                }
-            else:
-                raw = await client.get(
-                    "/thematics/indicator/filters/",
-                    params={"id_indicador": id_indicador},
-                )
-                data = format_indicator_filters(raw if isinstance(raw, list) else [])
-                return {
-                    "id_indicador": id_indicador,
-                    "count": len(data),
-                    "data": data,
-                }
+            # indicator-specific filter endpoints are currently unavailable;
+            # datos_popup returns the full census profile for the geography
+            raw = await client.get(f"/cpv/indicator/datos_popup/{id_geografia}/")
+            profile = format_geography_profile(raw)
+            return {
+                "id_indicador": id_indicador,
+                "id_geografia": id_geografia,
+                "note": (
+                    "Indicator-specific filter endpoints are currently unavailable. "
+                    "Returning the full census profile for this geography; "
+                    "find your indicator in seccion1 (summary) or seccion2 (detailed)."
+                ),
+                **profile,
+            }
         except INEITimeoutError as exc:
             raise ToolError(str(exc)) from exc
         except (INEINotFoundError, INEIAPIError) as exc:
@@ -130,9 +132,9 @@ def register_indicator_tools(mcp: FastMCP, client: INEIClient) -> None:
             "Browse the INEI thematic indicator tree — all categories and sub-categories.\n\n"
             "Returns the hierarchical topic tree with ~1977 entries from the Census 2017 database.\n"
             "Nodes with tipo=1 are categories; tipo=2 are leaf indicators with an id_indicador.\n\n"
-            "Use `id_indicador` (only on tipo=2 nodes) with `inei_get_indicator_data`.\n\n"
-            "**Top-level categories include:**\n"
-            "DEMOGRAFICO, SOCIAL, ECONOMICO, VIVIENDA, HOGARES, EDUCACION, SALUD, EMPLEO"
+            "Use id_indicador (only on tipo=2 nodes) with inei_get_indicator_data (requires id_geografia).\n\n"
+            "Top-level categories include DEMOGRAFICO, SOCIAL, ECONOMICO, VIVIENDA, HOGARES, "
+            "EDUCACION, SALUD, EMPLEO."
         ),
     )
     async def inei_browse_topics(
